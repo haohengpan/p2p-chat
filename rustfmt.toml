@@ -1,0 +1,28 @@
+# === 基础风格 ===
+edition = "2021"                 # 与 Cargo.toml 中 [package] edition 保持一致
+max_width = 120                  # 最大行宽
+hard_tabs = false                # 使用空格而非制表符
+newline_style = "Unix"           # 统一换行风格: "Unix" | "Windows" | "Native"
+use_small_heuristics = "Max"     # 更积极地单行布局，减少“换行噪音”
+fn_params_layout = "Compressed"  # 函数参数更紧凑布局
+
+# === 注释与文档 ===
+wrap_comments = true                         # 长行注释自动换行
+format_code_in_doc_comments = true          # 格式化文档注释中的代码块
+normalize_doc_attributes = true             # 统一 doc 属性风格
+
+# === 导入整理 ===
+reorder_imports = true
+imports_granularity = "Crate"               # "Preserve" | "Item" | "Module" | "Crate"
+group_imports = "StdExternalCrate"          # 分组: 标准库/第三方/本地
+# 注：上面两项在较新 rustfmt 已稳定；若你的 rustfmt 版本太老，需要升级。
+
+# === 逗号与换行 ===
+trailing_comma = "Vertical"                 # 多行尾随逗号，利于 diff
+match_block_trailing_comma = true
+
+# === 细节一致性 ===
+merge_derives = true                         # 合并派生宏: #[derive(A,B)]
+use_field_init_shorthand = true              # 结构体字面量用简写
+hex_literal_case = "Lower"                   # 十六进制统一小写
+enum_discrim_align_threshold = 20            # 枚举判别值对齐阈值（视觉整洁）

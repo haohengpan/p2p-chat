@@ -29,25 +29,42 @@
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 
+// ---------------------------------------------------------------------------
+// Rendering types  (terminal-UI-specific; not part of the node↔UI protocol)
+// ---------------------------------------------------------------------------
+
+/// Visual category of a line in the message pane.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LineKind {
+    Incoming,
+    Outgoing,
+    System,
+}
+
+/// A single rendered line in the message pane.
+#[derive(Debug, Clone)]
+pub struct DisplayLine {
+    pub kind: LineKind,
+    pub text: String,
+}
+
 const HELP_LINES: &[&str] = &[
     "Commands:",
-    "  connect <ip>       - Connect by IP (probes ports 9000-9004 concurrently)",
-    "  connect <ip:port>  - Connect to a peer at an explicit address",
-    "  connect <node_id>  - Reconnect to a known peer (registry lookup)",
-    "  chat <node_id>               - Enter focused chat mode with a peer",
+    "  connect <addr>               - Connect (ip:port, ip, or node_id)",
+    "  disconnect <node_id>         - Disconnect from a peer",
+    "  chat <node_id>               - Enter chat mode with a peer",
     "  chat                         - Exit chat mode",
-    "  list                         - Show currently connected peers",
-    "  peers                        - Show all known peers (with online status)",
     "  send <node_id> <message>     - Send a direct message",
-    "  broadcast <message>          - Broadcast to all connected peers",
+    "  history [node_id]            - Show chat history",
+    "  list / peers                 - Show connected peers",
     "  quit                         - Exit the application",
     "",
     "In chat mode:",
     "  <message>     - Send message to current chat partner",
     "  /exit         - Leave chat mode",
-    "  /<command>    - Run any command (e.g. /list, /peers)",
+    "  /<command>    - Run any command (e.g. /list, /history)",
     "",
-    "Keys: ↑↓ = scroll (empty input) or history | PageUp/Dn | Esc = bottom",
+    "Keys: ↑↓ = scroll/history | PageUp/Dn | Esc = bottom",
 ];
 
 use anyhow::Result;
@@ -67,8 +84,14 @@ use ratatui::{
 };
 use tokio::sync::mpsc;
 
-use crate::event::{AppEvent, DisplayLine, LineKind, NodeCommand};
-use crate::network::format_time;
+use crate::api::{Command, Content, MessageStatus, Notify, NoticeLevel};
+
+fn format_time(ts: u64) -> String {
+    let secs = ts % 60;
+    let mins = (ts / 60) % 60;
+    let hours = (ts / 3600) % 24;
+    format!("{:02}:{:02}:{:02}", hours, mins, secs)
+}
 
 const MAX_MESSAGES: usize = 500;
 
@@ -125,21 +148,15 @@ pub async fn run_setup(listen_addr: SocketAddr) -> Result<(String, String, Term)
             let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
             let _ = terminal.show_cursor();
             Err(e)
-        }
+        },
     }
 }
 
 async fn setup_loop(
-    terminal: &mut Term,
-    listen_addr: SocketAddr,
-    lan_ip: &str,
+    terminal: &mut Term, listen_addr: SocketAddr, lan_ip: &str,
 ) -> Result<(String, String)> {
-    let mut state = SetupState {
-        node_id: String::new(),
-        username: String::new(),
-        focus: 0,
-        error: None,
-    };
+    let mut state =
+        SetupState { node_id: String::new(), username: String::new(), focus: 0, error: None };
     let mut keys = EventStream::new();
 
     loop {
@@ -151,17 +168,16 @@ async fn setup_loop(
                     if let Some(result) = handle_setup_key(&mut state, key)? {
                         return Ok(result);
                     }
-                }
-                Event::Resize(_, _) => {}
-                _ => {}
+                },
+                Event::Resize(_, _) => {},
+                _ => {},
             }
         }
     }
 }
 
 fn handle_setup_key(
-    state: &mut SetupState,
-    key: crossterm::event::KeyEvent,
+    state: &mut SetupState, key: crossterm::event::KeyEvent,
 ) -> Result<Option<(String, String)>> {
     state.error = None;
 
@@ -169,7 +185,7 @@ fn handle_setup_key(
         // Quit
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             return Err(anyhow::anyhow!("Setup cancelled by user"));
-        }
+        },
 
         // Confirm / advance
         KeyCode::Enter => {
@@ -193,18 +209,18 @@ fn handle_setup_key(
                     return Ok(Some((nid, uname)));
                 }
             }
-        }
+        },
 
         // Switch field
         KeyCode::Tab | KeyCode::BackTab => {
             state.focus = 1 - state.focus;
-        }
+        },
         KeyCode::Up => {
             state.focus = 0;
-        }
+        },
         KeyCode::Down => {
             state.focus = 1;
-        }
+        },
 
         // Edit active field
         KeyCode::Backspace => {
@@ -213,7 +229,7 @@ fn handle_setup_key(
             } else {
                 state.username.pop();
             }
-        }
+        },
 
         KeyCode::Char(c) => {
             if state.focus == 0 {
@@ -224,9 +240,9 @@ fn handle_setup_key(
             } else {
                 state.username.push(c);
             }
-        }
+        },
 
-        _ => {}
+        _ => {},
     }
     Ok(None)
 }
@@ -257,18 +273,13 @@ fn render_setup(f: &mut Frame, state: &SetupState, listen_addr: SocketAddr, lan_
         .border_style(Style::default().fg(Color::Cyan))
         .title(Span::styled(
             " P2P Chat — Setup ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(dialog);
     f.render_widget(block, dialog);
 
     if inner.height < 10 || inner.width < 32 {
-        f.render_widget(
-            Paragraph::new("Terminal too small — please resize."),
-            inner,
-        );
+        f.render_widget(Paragraph::new("Terminal too small — please resize."), inner);
         return;
     }
 
@@ -301,19 +312,15 @@ fn render_setup(f: &mut Frame, state: &SetupState, listen_addr: SocketAddr, lan_
         format!("LAN    {}:{}   ← share this address with peers", lan_ip, port)
     };
     f.render_widget(
-        Paragraph::new(lan_text).style(
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Paragraph::new(lan_text)
+            .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
         chunks[1],
     );
 
     // ── node_id ───────────────────────────────────────────────────────────
     let (nid_label, nid_border) = field_styles(state.focus == 0);
     f.render_widget(
-        Paragraph::new("Node ID  (unique identifier, no spaces):")
-            .style(nid_label),
+        Paragraph::new("Node ID  (unique identifier, no spaces):").style(nid_label),
         chunks[3],
     );
     f.render_widget(
@@ -325,8 +332,7 @@ fn render_setup(f: &mut Frame, state: &SetupState, listen_addr: SocketAddr, lan_
     // ── username ──────────────────────────────────────────────────────────
     let (uname_label, uname_border) = field_styles(state.focus == 1);
     f.render_widget(
-        Paragraph::new("Username  (display name visible to peers):")
-            .style(uname_label),
+        Paragraph::new("Username  (display name visible to peers):").style(uname_label),
         chunks[6],
     );
     f.render_widget(
@@ -358,8 +364,8 @@ fn render_setup(f: &mut Frame, state: &SetupState, listen_addr: SocketAddr, lan_
     } else {
         (chunks[7], state.username.len())
     };
-    let cx = (input_area.x + 1 + text_len as u16)
-        .min(input_area.x + input_area.width.saturating_sub(2));
+    let cx =
+        (input_area.x + 1 + text_len as u16).min(input_area.x + input_area.width.saturating_sub(2));
     let cy = input_area.y + 1;
     f.set_cursor_position((cx, cy));
 }
@@ -368,16 +374,11 @@ fn render_setup(f: &mut Frame, state: &SetupState, listen_addr: SocketAddr, lan_
 fn field_styles(focused: bool) -> (Style, Style) {
     if focused {
         (
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             Style::default().fg(Color::Yellow),
         )
     } else {
-        (
-            Style::default().fg(Color::White),
-            Style::default().fg(Color::DarkGray),
-        )
+        (Style::default().fg(Color::White), Style::default().fg(Color::DarkGray))
     }
 }
 
@@ -396,6 +397,8 @@ struct App {
     scroll_offset: usize,
     history: Vec<String>,
     history_idx: Option<usize>,
+    /// Counter for generating unique client-side message IDs.
+    msg_seq: u64,
 }
 
 impl App {
@@ -408,7 +411,13 @@ impl App {
             scroll_offset: 0,
             history: Vec::new(),
             history_idx: None,
+            msg_seq: 0,
         }
+    }
+
+    fn next_msg_id(&mut self) -> String {
+        self.msg_seq += 1;
+        format!("msg-{}", self.msg_seq)
     }
 
     fn push(&mut self, line: DisplayLine) {
@@ -419,10 +428,7 @@ impl App {
     }
 
     fn system(&mut self, text: impl Into<String>) {
-        self.push(DisplayLine {
-            kind: LineKind::System,
-            text: text.into(),
-        });
+        self.push(DisplayLine { kind: LineKind::System, text: text.into() });
     }
 }
 
@@ -432,11 +438,8 @@ impl App {
 ///
 /// Startup banner is built here from the node identity and listen address.
 pub async fn run_tui(
-    mut terminal: Term,
-    event_rx: mpsc::UnboundedReceiver<AppEvent>,
-    cmd_tx: mpsc::UnboundedSender<NodeCommand>,
-    listen_addr: SocketAddr,
-    node_id: String,
+    mut terminal: Term, event_rx: mpsc::UnboundedReceiver<Notify>,
+    cmd_tx: mpsc::UnboundedSender<Command>, listen_addr: SocketAddr, node_id: String,
     username: String,
 ) -> Result<()> {
     let port = listen_addr.port();
@@ -453,7 +456,7 @@ pub async fn run_tui(
     for line in &node_info {
         app.system(line.as_str());
     }
-    app.system("Commands: help | connect | chat | list | peers | send | broadcast | quit");
+    app.system("Commands: help | connect | chat | send | history | list | quit");
     app.system("Keys: ↑↓ scroll/history | PageUp/Dn | Esc=bottom | Ctrl-C quit");
     app.system(sep);
 
@@ -472,10 +475,8 @@ pub async fn run_tui(
 // ---------------------------------------------------------------------------
 
 async fn chat_loop(
-    terminal: &mut Term,
-    app: &mut App,
-    mut event_rx: mpsc::UnboundedReceiver<AppEvent>,
-    cmd_tx: mpsc::UnboundedSender<NodeCommand>,
+    terminal: &mut Term, app: &mut App, mut event_rx: mpsc::UnboundedReceiver<Notify>,
+    cmd_tx: mpsc::UnboundedSender<Command>,
 ) -> Result<()> {
     let mut keys = EventStream::new();
 
@@ -503,7 +504,7 @@ async fn chat_loop(
             msg = event_rx.recv() => {
                 match msg {
                     Some(ev) => {
-                        if handle_app_event(app, ev) {
+                        if handle_notify(app, ev) {
                             terminal.draw(|f| render_chat(f, app))?;
                             break;
                         }
@@ -563,24 +564,17 @@ fn render_chat(f: &mut Frame, app: &App) {
         })
         .collect();
 
-    let scroll_hint = if app.scroll_offset > 0 {
-        format!(" ↑{} ", app.scroll_offset)
-    } else {
-        String::new()
-    };
+    let scroll_hint =
+        if app.scroll_offset > 0 { format!(" ↑{} ", app.scroll_offset) } else { String::new() };
 
     f.render_widget(
-        List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(title + &scroll_hint)),
+        List::new(items).block(Block::default().borders(Borders::ALL).title(title + &scroll_hint)),
         chunks[0],
     );
 
     // ── input bar ──────────────────────────────────────────────────────────
     let (prompt, bar_title) = if let Some(ref p) = app.current_chat {
-        (
-            format!("[{}]> {}", p, app.input),
-            " Chat mode — type to send | /exit to leave ",
-        )
+        (format!("[{}]> {}", p, app.input), " Chat mode — type to send | /exit to leave ")
     } else {
         (format!("> {}", app.input), " Command ")
     };
@@ -602,9 +596,7 @@ fn render_chat(f: &mut Frame, app: &App) {
 // ---------------------------------------------------------------------------
 
 fn handle_key(
-    app: &mut App,
-    key: crossterm::event::KeyEvent,
-    cmd_tx: &mpsc::UnboundedSender<NodeCommand>,
+    app: &mut App, key: crossterm::event::KeyEvent, cmd_tx: &mpsc::UnboundedSender<Command>,
 ) -> Result<bool> {
     match key.code {
         KeyCode::Enter => {
@@ -619,21 +611,21 @@ fn handle_key(
             app.input.clear();
             app.scroll_offset = 0;
             return route_input(app, input, cmd_tx);
-        }
+        },
 
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            let _ = cmd_tx.send(NodeCommand::Quit);
+            let _ = cmd_tx.send(Command::Shutdown);
             return Ok(true);
-        }
+        },
 
         KeyCode::Char(c) => {
             app.history_idx = None;
             app.input.push(c);
-        }
+        },
 
         KeyCode::Backspace => {
             app.input.pop();
-        }
+        },
 
         KeyCode::Up => {
             if app.input.is_empty() {
@@ -650,7 +642,7 @@ fn handle_key(
                     app.input = app.history[idx].clone();
                 }
             }
-        }
+        },
 
         KeyCode::Down => {
             if app.input.is_empty() {
@@ -665,29 +657,27 @@ fn handle_key(
                     app.input.clear();
                 }
             }
-        }
+        },
 
         KeyCode::PageUp => {
             app.scroll_offset = app.scroll_offset.saturating_add(10);
-        }
+        },
 
         KeyCode::PageDown => {
             app.scroll_offset = app.scroll_offset.saturating_sub(10);
-        }
+        },
 
         KeyCode::Esc => {
             app.scroll_offset = 0;
-        }
+        },
 
-        _ => {}
+        _ => {},
     }
     Ok(false)
 }
 
 fn route_input(
-    app: &mut App,
-    input: String,
-    cmd_tx: &mpsc::UnboundedSender<NodeCommand>,
+    app: &mut App, input: String, cmd_tx: &mpsc::UnboundedSender<Command>,
 ) -> Result<bool> {
     if let Some(ref partner) = app.current_chat.clone() {
         if let Some(cmd_str) = input.strip_prefix('/') {
@@ -695,14 +685,19 @@ fn route_input(
             if cmd_str == "exit" || cmd_str == "chat" {
                 app.system(format!("Left chat with '{}'", partner));
                 app.current_chat = None;
-                let _ = cmd_tx.send(NodeCommand::Chat(None));
                 return Ok(false);
             }
             return dispatch(app, cmd_str, cmd_tx);
         }
-        let _ = cmd_tx.send(NodeCommand::SendMessage {
-            to: partner.clone(),
-            content: input,
+        let msg_id = app.next_msg_id();
+        // Optimistic update: show message immediately
+        let t = format_time(crate::app::now());
+        let text = format!("[{}] → {}: {}", t, partner, input);
+        app.push(DisplayLine { kind: LineKind::Outgoing, text });
+        let _ = cmd_tx.send(Command::SendMessage {
+            conv_id: partner.clone(),
+            msg_id,
+            content: Content::Text(input),
         });
         return Ok(false);
     }
@@ -714,11 +709,7 @@ fn route_input(
 // Command dispatch
 // ---------------------------------------------------------------------------
 
-fn dispatch(
-    app: &mut App,
-    cmd: &str,
-    cmd_tx: &mpsc::UnboundedSender<NodeCommand>,
-) -> Result<bool> {
+fn dispatch(app: &mut App, cmd: &str, cmd_tx: &mpsc::UnboundedSender<Command>) -> Result<bool> {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() {
         return Ok(false);
@@ -726,40 +717,31 @@ fn dispatch(
 
     match parts[0] {
         "quit" | "exit" => {
-            let _ = cmd_tx.send(NodeCommand::Quit);
+            let _ = cmd_tx.send(Command::Shutdown);
             return Ok(true);
-        }
+        },
         "help" => {
             for line in HELP_LINES {
                 app.system(*line);
             }
-        }
-        "list" => {
-            let _ = cmd_tx.send(NodeCommand::ListConnected);
-        }
-        "peers" => {
-            let _ = cmd_tx.send(NodeCommand::ListPeers);
-        }
+        },
+        "list" | "peers" => {
+            let _ = cmd_tx.send(Command::ListPeers);
+        },
         "connect" => {
             if parts.len() != 2 {
                 app.system("Usage: connect <ip>  |  connect <ip:port>  |  connect <node_id>");
-            } else if parts[1].parse::<std::net::IpAddr>().is_ok() {
-                // Pure IP → probe DEFAULT_PORTS concurrently
-                let _ = cmd_tx.send(NodeCommand::ConnectByIp {
-                    ip: parts[1].to_string(),
-                });
-            } else if parts[1].parse::<std::net::SocketAddr>().is_ok() {
-                // ip:port → connect directly, node-id from handshake
-                let _ = cmd_tx.send(NodeCommand::Connect {
-                    addr: parts[1].to_string(),
-                });
             } else {
-                // node_id → registry lookup
-                let _ = cmd_tx.send(NodeCommand::ConnectById {
-                    node_id: parts[1].to_string(),
-                });
+                let _ = cmd_tx.send(Command::Connect { addr: parts[1].to_string() });
             }
-        }
+        },
+        "disconnect" => {
+            if parts.len() != 2 {
+                app.system("Usage: disconnect <node_id>");
+            } else {
+                let _ = cmd_tx.send(Command::Disconnect { peer_id: parts[1].to_string() });
+            }
+        },
         "chat" => {
             if parts.len() >= 2 {
                 let node_id = parts[1].to_string();
@@ -768,41 +750,51 @@ fn dispatch(
                     "Entering chat with '{}'. Type to send, /exit to leave.",
                     node_id
                 ));
-                let _ = cmd_tx.send(NodeCommand::Chat(Some(node_id)));
             } else if let Some(ref p) = app.current_chat.clone() {
                 let p = p.clone();
                 app.current_chat = None;
                 app.system(format!("Left chat with '{}'", p));
-                let _ = cmd_tx.send(NodeCommand::Chat(None));
             } else {
                 app.system("Not in chat mode");
             }
-        }
+        },
         "send" => {
             if parts.len() >= 3 {
-                let _ = cmd_tx.send(NodeCommand::SendMessage {
-                    to: parts[1].to_string(),
-                    content: parts[2..].join(" "),
+                let msg_id = app.next_msg_id();
+                let to = parts[1];
+                let body = parts[2..].join(" ");
+                let t = format_time(crate::app::now());
+                let text = format!("[{}] → {}: {}", t, to, body);
+                app.push(DisplayLine { kind: LineKind::Outgoing, text });
+                let _ = cmd_tx.send(Command::SendMessage {
+                    conv_id: to.to_string(),
+                    msg_id,
+                    content: Content::Text(body),
                 });
             } else {
                 app.system("Usage: send <node_id> <message>");
             }
-        }
-        "broadcast" => {
+        },
+        "history" => {
             if parts.len() >= 2 {
-                let _ = cmd_tx.send(NodeCommand::BroadcastMessage {
-                    content: parts[1..].join(" "),
+                let _ = cmd_tx.send(Command::GetHistory {
+                    conv_id: parts[1].to_string(),
+                    before: None,
+                    limit: 32,
+                });
+            } else if let Some(ref p) = app.current_chat {
+                let _ = cmd_tx.send(Command::GetHistory {
+                    conv_id: p.clone(),
+                    before: None,
+                    limit: 32,
                 });
             } else {
-                app.system("Usage: broadcast <message>");
+                app.system("Usage: history <node_id>");
             }
-        }
+        },
         other => {
-            app.system(format!(
-                "Unknown command '{}'. Type 'help' for available commands.",
-                other
-            ));
-        }
+            app.system(format!("Unknown command '{}'. Type 'help' for available commands.", other));
+        },
     }
 
     Ok(false)
@@ -812,78 +804,79 @@ fn dispatch(
 // AppEvent → UI state
 // ---------------------------------------------------------------------------
 
-fn handle_app_event(app: &mut App, event: AppEvent) -> bool {
+fn handle_notify(app: &mut App, event: Notify) -> bool {
     match event {
-        AppEvent::MessageReceived {
-            from_id,
-            from_name,
-            to,
-            content,
-            timestamp,
-        } => {
-            let t = format_time(timestamp);
-            let text = match to {
-                Some(_) => format!("[{}] {} ({}): {}", t, from_name, from_id, content),
-                None => format!("[{}] {} ({}) → all: {}", t, from_name, from_id, content),
+        Notify::MessageReceived { conv_id, msg } => {
+            let t = format_time(msg.timestamp);
+            let text_content = match &msg.content {
+                Content::Text(s) => s.as_str(),
             };
-            app.push(DisplayLine {
-                kind: LineKind::Incoming,
-                text,
-            });
-        }
+            let text = format!("[{}] {} ({}): {}", t, msg.from, conv_id, text_content);
+            app.push(DisplayLine { kind: LineKind::Incoming, text });
+        },
 
-        AppEvent::MessageSent {
-            to,
-            content,
-            timestamp,
-            ok_count,
-            total,
-            our_name,
-            our_id,
-        } => {
-            let t = format_time(timestamp);
-            let text = match to {
-                Some(ref dest) => {
-                    format!("[{}] {} ({}) → {}: {}", t, our_name, our_id, dest, content)
-                }
-                None => format!(
-                    "[{}] {} ({}) → all [{}/{}]: {}",
-                    t, our_name, our_id, ok_count, total, content
-                ),
-            };
-            app.push(DisplayLine {
-                kind: LineKind::Outgoing,
-                text,
-            });
-        }
-
-        AppEvent::PeerConnected { node_id, username } => {
-            if !app.online_peers.contains(&node_id) {
-                app.online_peers.push(node_id.clone());
+        Notify::MessageAck { msg_id, status } => {
+            match status {
+                MessageStatus::Sent => {},
+                MessageStatus::Failed(err) => {
+                    app.system(format!("Send failed [{}]: {}", msg_id, err));
+                },
             }
-            app.system(format!("[SYSTEM] {} ({}) connected", node_id, username));
-        }
+        },
 
-        AppEvent::PeerDisconnected { node_id, reason } => {
-            app.online_peers.retain(|p| p != &node_id);
-            app.system(format!("[SYSTEM] {} disconnected: {}", node_id, reason));
-        }
+        Notify::PeerOnline { peer_id, peer_name, addr } => {
+            if !app.online_peers.contains(&peer_id) {
+                app.online_peers.push(peer_id.clone());
+            }
+            app.system(format!("{} ({}) connected from {}", peer_name, peer_id, addr));
+        },
 
-        AppEvent::SystemNotice(msg) => {
-            app.system(format!("[SYSTEM] {}", msg));
-        }
+        Notify::PeerOffline { peer_id } => {
+            app.online_peers.retain(|p| p != &peer_id);
+            app.system(format!("{} disconnected", peer_id));
+        },
 
-        AppEvent::CommandOutput(line) => {
-            app.push(DisplayLine {
-                kind: LineKind::System,
-                text: line,
-            });
-        }
+        Notify::PeerList { peers } => {
+            if peers.is_empty() {
+                app.system("No connected peers".to_string());
+            } else {
+                app.system(format!("Connected peers ({}):", peers.len()));
+                for p in peers {
+                    app.push(DisplayLine {
+                        kind: LineKind::System,
+                        text: format!("  {} ({}) - {}", p.peer_name, p.peer_id, p.addr),
+                    });
+                }
+            }
+        },
 
-        AppEvent::NodeShutdown => {
-            app.system("[SYSTEM] Node has shut down gracefully.");
-            return true;
-        }
+        Notify::History { conv_id, messages } => {
+            if messages.is_empty() {
+                app.system(format!("No history for '{}'", conv_id));
+            } else {
+                app.system(format!("History for '{}' ({} messages):", conv_id, messages.len()));
+                for msg in messages {
+                    let t = format_time(msg.timestamp);
+                    let text_content = match &msg.content {
+                        Content::Text(s) => s.as_str(),
+                    };
+                    let status_tag = match &msg.status {
+                        MessageStatus::Sent => "",
+                        MessageStatus::Failed(_) => " [FAILED]",
+                    };
+                    let text = format!("  [{}] {} ({}): {}{}", t, msg.from, msg.msg_id, text_content, status_tag);
+                    app.push(DisplayLine { kind: LineKind::System, text });
+                }
+            }
+        },
+
+        Notify::Notice { level, content } => {
+            let prefix = match level {
+                NoticeLevel::Info => "",
+                NoticeLevel::Error => "[ERROR] ",
+            };
+            app.system(format!("{}{}", prefix, content));
+        },
     }
     false
 }
