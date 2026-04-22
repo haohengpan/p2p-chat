@@ -15,7 +15,10 @@
     error = "";
     try {
       await connect(a);
-      onClose();
+      error = "Command sent, waiting for response...";
+      loading = false;
+      // Don't close immediately — let user see the notice bar for result
+      setTimeout(() => onClose(), 2000);
     } catch (e: any) {
       error = String(e);
       loading = false;

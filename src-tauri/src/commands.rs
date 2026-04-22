@@ -36,6 +36,7 @@ pub struct SetupResult {
 
 #[tauri::command]
 pub fn connect(addr: String) -> Result<(), String> {
+    tracing::info!("connect command received: {}", addr);
     bridge::cmd_tx()
         .send(Command::Connect { addr })
         .map_err(|e| e.to_string())

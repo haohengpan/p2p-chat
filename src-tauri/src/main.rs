@@ -2,16 +2,22 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    // File-based logging (same as TUI version)
+    // Log to a known location: next to the executable
+    let log_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("p2p-chat.log")))
+        .unwrap_or_else(|| std::path::PathBuf::from("p2p-chat.log"));
+
     if let Ok(log_file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("p2p-chat.log")
+        .open(&log_path)
     {
         tracing_subscriber::fmt()
             .with_writer(log_file)
             .with_ansi(false)
             .init();
+        tracing::info!("=== P2P Chat started, log: {:?} ===", log_path);
     }
 
     tauri::Builder::default()

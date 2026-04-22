@@ -49,7 +49,10 @@ pub fn start_backend(
     // Forward Notify events to the frontend via Tauri events
     tauri::async_runtime::spawn(async move {
         while let Some(notify) = notify_rx.recv().await {
-            let _ = handle.emit("notify", &notify);
+            tracing::info!("emit notify: {:?}", notify);
+            if let Err(e) = handle.emit("notify", &notify) {
+                tracing::error!("emit error: {}", e);
+            }
         }
     });
 

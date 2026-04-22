@@ -50,11 +50,19 @@ impl App {
         loop {
             tokio::select! {
                 Some((token, packet)) = net_rx.recv() => {
-                    self.handle_packet(token, packet)?;
+                    if let Err(e) = self.handle_packet(token, packet) {
+                        tracing::error!("packet error: {}", e);
+                        self.notice(NoticeLevel::Error, format!("Network error: {}", e));
+                    }
                 }
                 Some(cmd) = cmd_rx.recv() => {
-                    if self.handle_command(cmd)? {
-                        return Ok(());
+                    match self.handle_command(cmd) {
+                        Ok(true) => return Ok(()),
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::error!("command error: {}", e);
+                            self.notice(NoticeLevel::Error, format!("Error: {}", e));
+                        }
                     }
                 }
                 else => break,
@@ -153,6 +161,7 @@ impl App {
 
     /// Smart connect: detects ip:port, bare ip (probe ports), or node_id.
     fn cmd_connect(&mut self, addr: &str) -> Result<()> {
+        tracing::info!("cmd_connect: {}", addr);
         if let Ok(sock) = addr.parse::<SocketAddr>() {
             return self.do_connect(sock);
         }
@@ -169,8 +178,14 @@ impl App {
             name: self.name.clone(),
             addr: self.listen_addr,
         };
-        self.message.connect(addr, &hello)?;
-        self.notice(NoticeLevel::Info, format!("Connecting to {}...", addr));
+        match self.message.connect(addr, &hello) {
+            Ok(()) => {
+                self.notice(NoticeLevel::Info, format!("Connecting to {}...", addr));
+            }
+            Err(e) => {
+                self.notice(NoticeLevel::Error, format!("Failed to connect to {}: {}", addr, e));
+            }
+        }
         Ok(())
     }
 
