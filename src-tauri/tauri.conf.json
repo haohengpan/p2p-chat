@@ -1,0 +1,32 @@
+{
+  "productName": "P2P Chat",
+  "version": "0.1.0",
+  "identifier": "com.p2pchat.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "P2P Chat",
+        "width": 900,
+        "height": 650,
+        "minWidth": 600,
+        "minHeight": 400
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": [
+      "icons/icon.png"
+    ]
+  }
+}
