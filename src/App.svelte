@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { onNotify, getSavedPeers, loadSavedHistory } from "./lib/api";
+  import { onNotify, getSavedPeers, loadSavedHistory, connect } from "./lib/api";
   import { handleNotify, peers, conversations, nodeId, type DisplayMessage } from "./lib/stores";
   import Setup from "./components/Setup.svelte";
   import ChatWindow from "./components/ChatWindow.svelte";
@@ -35,6 +35,14 @@
             conversations.update((c) => ({ ...c, [p.peer_id]: dms }));
           }
         }
+        // Auto-reconnect all saved peers
+        for (const p of savedPeers) {
+          try {
+            await connect(p.addr);
+          } catch (_) {
+            // Connection failures will show via Notice
+          }
+        }
       }
     } catch (_) {
       // No saved data
@@ -42,6 +50,11 @@
   }
 
   onMount(() => {
+    // Request notification permission
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+
     const unlistenPromise = onNotify((event) => {
       handleNotify(event);
     });

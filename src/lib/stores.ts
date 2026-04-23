@@ -100,14 +100,16 @@ export function handleNotify(event: Notify): void {
     addNotice("Info", `${peer_id} disconnected`);
   } else if ("MessageReceived" in event) {
     const { conv_id, msg } = event.MessageReceived;
+    const text = typeof msg.content === "object" && "Text" in msg.content ? msg.content.Text : "";
     const dm: DisplayMessage = {
       msg_id: msg.msg_id,
       from: msg.from,
-      content: typeof msg.content === "object" && "Text" in msg.content ? msg.content.Text : "",
+      content: text,
       timestamp: msg.timestamp,
       direction: "incoming",
     };
     pushMessage(conv_id, dm);
+    notifyIncoming(conv_id, msg.from, text);
   } else if ("MessageAck" in event) {
     const { msg_id, status } = event.MessageAck;
     if (typeof status === "object" && "Failed" in status) {
@@ -151,6 +153,49 @@ export function addOutgoingMessage(convId: string, msgId: string, content: strin
     direction: "outgoing",
   };
   pushMessage(convId, dm);
+}
+
+/** Unread message counts per conversation */
+export const unreadCounts = writable<Record<string, number>>({});
+
+/** Mark a conversation as read (clear unread count). */
+export function markRead(convId: string): void {
+  unreadCounts.update((c) => {
+    const { [convId]: _, ...rest } = c;
+    return rest;
+  });
+}
+
+/** Show a desktop notification for an incoming message. */
+function notifyIncoming(convId: string, from: string, text: string): void {
+  // Find peer display name
+  let peerName = from;
+  const unsub = peers.subscribe((ps) => {
+    const p = ps.find((p) => p.peer_id === from);
+    if (p) peerName = p.peer_name;
+  });
+  unsub();
+
+  // Increment unread count if not viewing this conversation
+  let currentConv: string | null = null;
+  const unsub2 = activeConv.subscribe((v) => { currentConv = v; });
+  unsub2();
+
+  if (currentConv !== convId || document.hidden) {
+    unreadCounts.update((c) => ({ ...c, [convId]: (c[convId] ?? 0) + 1 }));
+  }
+
+  // Desktop notification when window is not focused or viewing a different conversation
+  if (document.hidden || currentConv !== convId) {
+    if (Notification.permission === "granted") {
+      new Notification(peerName, {
+        body: text.length > 100 ? text.slice(0, 100) + "..." : text,
+        tag: `msg-${convId}`,
+      });
+    } else if (Notification.permission !== "denied") {
+      Notification.requestPermission();
+    }
+  }
 }
 
 function addNotice(level: "Info" | "Error", content: string): void {

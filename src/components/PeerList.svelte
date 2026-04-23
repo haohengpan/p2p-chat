@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { peers, activeConv } from "../lib/stores";
+  import { peers, activeConv, unreadCounts, markRead } from "../lib/stores";
   import { connect } from "../lib/api";
 
   function selectPeer(peerId: string) {
     activeConv.set(peerId);
+    markRead(peerId);
   }
 
   async function reconnect(peer: { peer_id: string; addr: string }) {
@@ -34,6 +35,9 @@
       <div class="peer-name">
         <span class="status-dot online"></span>
         {peer.peer_name}
+        {#if $unreadCounts[peer.peer_id]}
+          <span class="unread-badge">{$unreadCounts[peer.peer_id]}</span>
+        {/if}
       </div>
       <div class="peer-id">{peer.peer_id}</div>
     </button>
@@ -51,6 +55,9 @@
         <div class="peer-name">
           <span class="status-dot offline"></span>
           {peer.peer_name}
+          {#if $unreadCounts[peer.peer_id]}
+            <span class="unread-badge">{$unreadCounts[peer.peer_id]}</span>
+          {/if}
         </div>
         <div class="peer-meta">
           <span class="peer-id">{peer.peer_id}</span>
@@ -149,5 +156,20 @@
 
   .reconnect:hover {
     text-decoration: underline;
+  }
+
+  .unread-badge {
+    background: #ef5350;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    min-width: 18px;
+    height: 18px;
+    border-radius: 9px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 5px;
+    margin-left: auto;
   }
 </style>

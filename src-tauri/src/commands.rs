@@ -36,6 +36,11 @@ pub fn setup(
         return Err("Backend already started".to_string());
     }
 
+    // Check if node_id already exists
+    if bridge::storage().load_profile(&node_id).is_some() {
+        return Err(format!("Node ID '{}' is already registered. Please use a different ID or login.", node_id));
+    }
+
     let listen_addr = crate::resolve_listen_addr(port)
         .map_err(|e| e.to_string())?;
     let lan_ip = crate::local_ip();
