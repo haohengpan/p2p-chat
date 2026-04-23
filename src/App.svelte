@@ -1,14 +1,44 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { onNotify } from "./lib/api";
-  import { handleNotify, nodeId, username, listenAddr, lanIp } from "./lib/stores";
+  import { onNotify, getSavedPeers, loadSavedHistory } from "./lib/api";
+  import { handleNotify, peers, conversations, nodeId, type DisplayMessage } from "./lib/stores";
   import Setup from "./components/Setup.svelte";
   import ChatWindow from "./components/ChatWindow.svelte";
+  import { get } from "svelte/store";
 
   let screen: "setup" | "chat" = $state("setup");
 
-  function onSetupDone() {
+  async function onSetupDone() {
     screen = "chat";
+    // Load saved peers (all start as offline; backend will emit PeerOnline for any that reconnect)
+    try {
+      const savedPeers = await getSavedPeers();
+      if (savedPeers.length > 0) {
+        peers.set(savedPeers.map((p) => ({
+          peer_id: p.peer_id,
+          peer_name: p.peer_name,
+          addr: p.addr,
+          online: false,
+        })));
+        // Load history for each saved peer
+        for (const p of savedPeers) {
+          const msgs = await loadSavedHistory(p.peer_id);
+          if (msgs.length > 0) {
+            const myId = get(nodeId);
+            const dms: DisplayMessage[] = msgs.map((msg) => ({
+              msg_id: msg.msg_id,
+              from: msg.from,
+              content: typeof msg.content === "object" && "Text" in msg.content ? msg.content.Text : "",
+              timestamp: msg.timestamp,
+              direction: msg.from === myId ? "outgoing" as const : "incoming" as const,
+            }));
+            conversations.update((c) => ({ ...c, [p.peer_id]: dms }));
+          }
+        }
+      }
+    } catch (_) {
+      // No saved data
+    }
   }
 
   onMount(() => {

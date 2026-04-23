@@ -5,7 +5,9 @@ use anyhow::Result;
 use mio::Token;
 use tokio::sync::mpsc;
 
-use crate::api::{Command, MessageStatus, Notify, NoticeLevel, NotifySender, PeerInfo};
+use crate::api::{Command, Content, MessageInfo, MessageStatus, Notify, NoticeLevel, NotifySender, PeerInfo};
+use crate::bridge;
+use crate::history::HistoryManager;
 use crate::net::{self, Message, Packet};
 use crate::node::Node;
 
@@ -16,6 +18,7 @@ pub struct App {
     pub name: String,
     pub listen_addr: SocketAddr,
     pub node_list: HashMap<String, Node>,
+    history: HistoryManager,
     message: Message,
     notify_tx: NotifySender,
 }
@@ -26,13 +29,33 @@ impl App {
         name: String,
         listen_addr: SocketAddr,
         notify_tx: mpsc::UnboundedSender<Notify>,
+        saved_history: HashMap<String, Vec<MessageInfo>>,
+        saved_peers: Vec<PeerInfo>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<(Token, Packet)>)> {
         let (message, net_rx) = net::start_network(listen_addr)?;
         let notify_tx = NotifySender::new(notify_tx);
 
+        let history = HistoryManager::new(saved_history);
+
+        let mut node_list = HashMap::new();
+
+        // Restore saved peers as offline nodes
+        for peer in &saved_peers {
+            let addr: SocketAddr = peer.addr.parse().unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap());
+            let node = Node::new_offline(
+                peer.peer_id.clone(),
+                peer.peer_name.clone(),
+                addr,
+                message.clone(),
+                notify_tx.clone(),
+            );
+            node_list.insert(peer.peer_id.clone(), node);
+        }
+
         let app = Self {
             node_id, name, listen_addr,
-            node_list: HashMap::new(),
+            node_list,
+            history,
             message, notify_tx,
         };
         Ok((app, net_rx))
@@ -40,6 +63,21 @@ impl App {
 
     fn notice(&self, level: NoticeLevel, content: String) {
         self.notify_tx.emit(Notify::Notice { level, content });
+    }
+
+    /// Save peers list to disk (includes both online and offline).
+    fn persist_peers(&self) {
+        let peers: Vec<PeerInfo> = self.node_list.values()
+            .map(|n| PeerInfo {
+                peer_id: n.node_id.clone(),
+                peer_name: n.name.clone(),
+                addr: n.addr.to_string(),
+                online: n.online,
+            })
+            .collect();
+        if let Err(e) = bridge::storage().save_peers(&peers) {
+            tracing::error!("save peers: {}", e);
+        }
     }
 
     pub async fn run(
@@ -101,39 +139,46 @@ impl App {
             name: self.name.clone(),
             addr: self.listen_addr,
         };
-        let node = self.create_node(node_id.clone(), name.clone(), addr, token);
-        node.send_packet(&reply)?;
+        let real_addr = self.resolve_peer_addr(token, addr);
+        self.upsert_node_online(node_id.clone(), name.clone(), real_addr, token);
+        if let Some(node) = self.node_list.get(&node_id) {
+            node.send_packet(&reply)?;
+        }
         self.notify_tx.emit(Notify::PeerOnline {
-            peer_id: node_id, peer_name: name, addr: addr.to_string(),
+            peer_id: node_id, peer_name: name, addr: real_addr.to_string(),
         });
+        self.persist_peers();
         Ok(())
     }
 
     fn on_connect_response(&mut self, token: Token, node_id: String, name: String, addr: SocketAddr) -> Result<()> {
-        self.create_node(node_id.clone(), name.clone(), addr, token);
+        let real_addr = self.resolve_peer_addr(token, addr);
+        self.upsert_node_online(node_id.clone(), name.clone(), real_addr, token);
         self.notify_tx.emit(Notify::PeerOnline {
-            peer_id: node_id, peer_name: name, addr: addr.to_string(),
+            peer_id: node_id, peer_name: name, addr: real_addr.to_string(),
         });
+        self.persist_peers();
         Ok(())
     }
 
     fn on_chat(&mut self, from: String, content: String, timestamp: u64) -> Result<()> {
-        if let Some(node) = self.node_list.get_mut(&from) {
-            // Generate msg_id for incoming messages (sender doesn't provide one yet)
+        if let Some(node) = self.node_list.get(&from) {
             let msg_id = format!("{}-{}", from, timestamp);
-            node.handle_chat(msg_id, content, timestamp);
+            let msg = node.handle_chat(msg_id, content, timestamp);
+            self.history.add_message(&from, msg);
         }
         Ok(())
     }
 
     fn on_disconnect(&mut self, token: Token) -> Result<()> {
         if let Some(id) = self.node_id_by_token(token) {
-            if let Some(node) = self.node_list.get(&id) {
+            if let Some(node) = self.node_list.get_mut(&id) {
                 node.close();
+                node.set_offline();
             }
             self.notify_tx.emit(Notify::PeerOffline { peer_id: id });
+            self.persist_peers();
         }
-        self.node_list.retain(|_, n| n.token != token);
         Ok(())
     }
 }
@@ -145,7 +190,11 @@ impl App {
 impl App {
     fn handle_command(&mut self, cmd: Command) -> Result<bool> {
         match cmd {
-            Command::Shutdown => return Ok(true),
+            Command::Shutdown => {
+                self.history.persist_all();
+                self.persist_peers();
+                return Ok(true);
+            }
             Command::Connect { addr } => self.cmd_connect(&addr)?,
             Command::Disconnect { peer_id } => self.cmd_disconnect(&peer_id)?,
             Command::SendMessage { conv_id, msg_id, content } => {
@@ -159,7 +208,6 @@ impl App {
         Ok(false)
     }
 
-    /// Smart connect: detects ip:port, bare ip (probe ports), or node_id.
     fn cmd_connect(&mut self, addr: &str) -> Result<()> {
         tracing::info!("cmd_connect: {}", addr);
         if let Ok(sock) = addr.parse::<SocketAddr>() {
@@ -208,27 +256,29 @@ impl App {
     }
 
     fn cmd_disconnect(&mut self, peer_id: &str) -> Result<()> {
-        if let Some(node) = self.node_list.get(peer_id) {
+        if let Some(node) = self.node_list.get_mut(peer_id) {
             node.close();
+            node.set_offline();
             self.notify_tx.emit(Notify::PeerOffline { peer_id: peer_id.to_string() });
-            self.node_list.remove(peer_id);
+            self.persist_peers();
         } else {
             self.notice(NoticeLevel::Error, format!("Unknown peer '{}'", peer_id));
         }
         Ok(())
     }
 
-    fn cmd_send_message(&mut self, conv_id: String, msg_id: String, content: crate::api::Content) -> Result<()> {
+    fn cmd_send_message(&mut self, conv_id: String, msg_id: String, content: Content) -> Result<()> {
         let text = match &content {
-            crate::api::Content::Text(s) => s.clone(),
+            Content::Text(s) => s.clone(),
         };
         let our_id = self.node_id.clone();
         let timestamp = now();
 
-        match self.node_list.get_mut(&conv_id) {
-            Some(node) => {
+        match self.node_list.get(&conv_id) {
+            Some(node) if node.online => {
                 match node.send_chat(&our_id, &msg_id, &text, timestamp) {
-                    Ok(()) => {
+                    Ok(msg) => {
+                        self.history.add_message(&conv_id, msg);
                         self.notify_tx.emit(Notify::MessageAck {
                             msg_id, status: MessageStatus::Sent,
                         });
@@ -240,6 +290,11 @@ impl App {
                     }
                 }
             }
+            Some(_) => {
+                self.notify_tx.emit(Notify::MessageAck {
+                    msg_id, status: MessageStatus::Failed("Peer is offline".to_string()),
+                });
+            }
             None => {
                 self.notify_tx.emit(Notify::MessageAck {
                     msg_id, status: MessageStatus::Failed(format!("Unknown peer '{}'", conv_id)),
@@ -250,11 +305,7 @@ impl App {
     }
 
     fn cmd_get_history(&self, conv_id: &str, before: Option<u64>, limit: u32) {
-        let messages = if let Some(node) = self.node_list.get(conv_id) {
-            node.get_history(before, limit)
-        } else {
-            Vec::new()
-        };
+        let messages = self.history.get_history(conv_id, before, limit);
         self.notify_tx.emit(Notify::History {
             conv_id: conv_id.to_string(),
             messages,
@@ -267,6 +318,7 @@ impl App {
                 peer_id: n.node_id.clone(),
                 peer_name: n.name.clone(),
                 addr: n.addr.to_string(),
+                online: n.online,
             })
             .collect();
         self.notify_tx.emit(Notify::PeerList { peers });
@@ -278,12 +330,27 @@ impl App {
 // ---------------------------------------------------------------------------
 
 impl App {
-    fn create_node(&mut self, node_id: String, name: String, addr: SocketAddr, token: Token) -> &mut Node {
-        self.node_list.insert(node_id.clone(), Node::new(
-            node_id.clone(), name, addr, token,
-            self.message.clone(), self.notify_tx.clone(),
-        ));
-        self.node_list.get_mut(&node_id).unwrap()
+    /// Insert or update a node to online state. Preserves history (managed by HistoryManager).
+    fn upsert_node_online(&mut self, node_id: String, name: String, addr: SocketAddr, token: Token) {
+        if let Some(node) = self.node_list.get_mut(&node_id) {
+            node.set_online(token, name, addr);
+        } else {
+            self.node_list.insert(node_id.clone(), Node::new(
+                node_id, name, addr, token,
+                self.message.clone(), self.notify_tx.clone(),
+            ));
+        }
+    }
+
+    /// Resolve the connectable peer address.
+    fn resolve_peer_addr(&self, token: Token, packet_addr: SocketAddr) -> SocketAddr {
+        if let Some(tcp_addr) = self.message.peer_addr(token) {
+            let real_ip = tcp_addr.ip();
+            let listen_port = packet_addr.port();
+            SocketAddr::new(real_ip, listen_port)
+        } else {
+            packet_addr
+        }
     }
 
     fn node_id_by_token(&self, token: Token) -> Option<String> {

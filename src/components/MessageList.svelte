@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import { activeMessages, activeConv, peers } from "../lib/stores";
+  import { activeMessages, activeConv, peers, username } from "../lib/stores";
 
   let container: HTMLDivElement;
   let autoScroll = $state(true);
@@ -24,7 +24,7 @@
 
   function formatTime(ts: number): string {
     const d = new Date(ts * 1000);
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return d.toLocaleString([], { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
 
   // Find peer display name
@@ -45,7 +45,7 @@
     {#each $activeMessages as msg}
       <div class="message" class:outgoing={msg.direction === "outgoing"} class:system={msg.direction === "system"}>
         <div class="msg-meta">
-          <span class="msg-from">{msg.direction === "outgoing" ? "You" : msg.from}</span>
+          <span class="msg-from">{msg.direction === "outgoing" ? $username : peerName(msg.from)}</span>
           <span class="msg-time">{formatTime(msg.timestamp)}</span>
         </div>
         <div class="msg-content">{msg.content}</div>

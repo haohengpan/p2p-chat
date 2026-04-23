@@ -9,6 +9,7 @@ export interface Peer {
   peer_id: string;
   peer_name: string;
   addr: string;
+  online: boolean;
 }
 
 export const peers = writable<Peer[]>([]);
@@ -80,14 +81,22 @@ export function handleNotify(event: Notify): void {
   if ("PeerOnline" in event) {
     const { peer_id, peer_name, addr } = event.PeerOnline;
     peers.update((ps) => {
-      if (ps.find((p) => p.peer_id === peer_id)) return ps;
-      return [...ps, { peer_id, peer_name, addr }];
+      const existing = ps.findIndex((p) => p.peer_id === peer_id);
+      if (existing >= 0) {
+        // Update existing peer to online
+        const updated = [...ps];
+        updated[existing] = { ...updated[existing], peer_name, addr, online: true };
+        return updated;
+      }
+      return [...ps, { peer_id, peer_name, addr, online: true }];
     });
     addNotice("Info", `${peer_name} (${peer_id}) connected from ${addr}`);
   } else if ("PeerOffline" in event) {
     const { peer_id } = event.PeerOffline;
-    peers.update((ps) => ps.filter((p) => p.peer_id !== peer_id));
-    activeConv.update((cur) => (cur === peer_id ? null : cur));
+    // Mark as offline instead of removing
+    peers.update((ps) =>
+      ps.map((p) => p.peer_id === peer_id ? { ...p, online: false } : p)
+    );
     addNotice("Info", `${peer_id} disconnected`);
   } else if ("MessageReceived" in event) {
     const { conv_id, msg } = event.MessageReceived;
@@ -109,6 +118,7 @@ export function handleNotify(event: Notify): void {
       peer_id: p.peer_id,
       peer_name: p.peer_name,
       addr: p.addr,
+      online: p.online,
     })));
   } else if ("History" in event) {
     const { conv_id, messages } = event.History;

@@ -6,18 +6,32 @@ use tokio::sync::mpsc;
 
 use crate::api::Command;
 use crate::app::App;
+use crate::storage::Storage;
 
 /// Global command sender — accessed by Tauri command handlers.
 static CMD_TX: OnceLock<mpsc::UnboundedSender<Command>> = OnceLock::new();
+
+/// Global storage — shared with command handlers for load_profile etc.
+static STORAGE: OnceLock<Storage> = OnceLock::new();
 
 /// Get the global command sender. Panics if backend is not started.
 pub fn cmd_tx() -> &'static mpsc::UnboundedSender<Command> {
     CMD_TX.get().expect("backend not started — call setup first")
 }
 
+/// Get the global storage.
+pub fn storage() -> &'static Storage {
+    STORAGE.get().expect("storage not initialized")
+}
+
 /// Check if backend has been started.
 pub fn is_started() -> bool {
     CMD_TX.get().is_some()
+}
+
+/// Initialize storage (called early, before setup).
+pub fn init_storage(storage: Storage) {
+    let _ = STORAGE.set(storage);
 }
 
 /// Start the backend: create App, spawn event loop, forward Notify to Tauri events.
@@ -35,8 +49,12 @@ pub fn start_backend(
     // Store global sender (only once)
     let _ = CMD_TX.set(cmd_tx);
 
+    // Load saved data for this user
+    let saved_history = storage().load_all_history();
+    let saved_peers = storage().load_peers();
+
     let (mut app, net_rx) = App::new(
-        node_id, username, listen_addr, notify_tx,
+        node_id, username, listen_addr, notify_tx, saved_history, saved_peers,
     )?;
 
     // Spawn App::run in Tauri's tokio runtime

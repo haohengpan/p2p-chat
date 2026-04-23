@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::net::SocketAddr;
 
 use anyhow::Result;
@@ -7,17 +6,18 @@ use mio::Token;
 use crate::api::{Content, MessageInfo, MessageStatus, Notify, NotifySender};
 use crate::net::{Message, Packet};
 
-const HISTORY_LIMIT: usize = 128;
-
 pub struct Node {
     pub node_id: String,
     pub name: String,
     pub addr: SocketAddr,
     pub token: Token,
-    pub history: VecDeque<MessageInfo>,
+    pub online: bool,
     message: Message,
     notify_tx: NotifySender,
 }
+
+/// Dummy token for offline nodes (never matches a real connection).
+pub const OFFLINE_TOKEN: Token = Token(usize::MAX);
 
 impl Node {
     pub fn new(
@@ -30,15 +30,44 @@ impl Node {
     ) -> Self {
         Self {
             node_id, name, addr, token,
-            history: VecDeque::new(),
+            online: true,
             message, notify_tx,
         }
     }
 
-    // -- Incoming message handling --
+    /// Create an offline node (loaded from saved peers, not yet connected).
+    pub fn new_offline(
+        node_id: String,
+        name: String,
+        addr: SocketAddr,
+        message: Message,
+        notify_tx: NotifySender,
+    ) -> Self {
+        Self {
+            node_id, name, addr,
+            token: OFFLINE_TOKEN,
+            online: false,
+            message, notify_tx,
+        }
+    }
 
-    /// Process an incoming chat message: record history, notify UI.
-    pub fn handle_chat(&mut self, msg_id: String, content: String, timestamp: u64) {
+    /// Bring this node online with a new connection token.
+    pub fn set_online(&mut self, token: Token, name: String, addr: SocketAddr) {
+        self.token = token;
+        self.name = name;
+        self.addr = addr;
+        self.online = true;
+    }
+
+    /// Mark this node as offline.
+    pub fn set_offline(&mut self) {
+        self.online = false;
+        self.token = OFFLINE_TOKEN;
+    }
+
+    /// Process an incoming chat message: build MessageInfo and notify UI.
+    /// Returns the MessageInfo so App can record it in HistoryManager.
+    pub fn handle_chat(&self, msg_id: String, content: String, timestamp: u64) -> MessageInfo {
         let msg = MessageInfo {
             msg_id,
             from: self.node_id.clone(),
@@ -46,18 +75,16 @@ impl Node {
             timestamp,
             status: MessageStatus::Sent,
         };
-        self.record(msg.clone());
         self.notify_tx.emit(Notify::MessageReceived {
             conv_id: self.node_id.clone(),
-            msg,
+            msg: msg.clone(),
         });
+        msg
     }
 
-    // -- Outgoing operations --
-
     /// Send a chat message to this peer.
-    /// Records outgoing history. Returns Ok/Err; caller emits MessageAck.
-    pub fn send_chat(&mut self, from_id: &str, msg_id: &str, content: &str, timestamp: u64) -> Result<()> {
+    /// Returns the MessageInfo on success so App can record it in HistoryManager.
+    pub fn send_chat(&self, from_id: &str, msg_id: &str, content: &str, timestamp: u64) -> Result<MessageInfo> {
         let pkt = Packet::Chat {
             from: from_id.to_string(),
             to: Some(self.node_id.clone()),
@@ -72,8 +99,7 @@ impl Node {
             timestamp,
             status: MessageStatus::Sent,
         };
-        self.record(msg);
-        Ok(())
+        Ok(msg)
     }
 
     /// Send a raw packet to this peer (e.g. ConnectResponse).
@@ -83,26 +109,8 @@ impl Node {
 
     /// Close the network connection for this peer.
     pub fn close(&self) {
-        self.message.close(self.token);
-    }
-
-    /// Get chat history for this peer/conversation.
-    pub fn get_history(&self, before: Option<u64>, limit: u32) -> Vec<MessageInfo> {
-        let iter = self.history.iter().rev();
-        let iter: Box<dyn Iterator<Item = &MessageInfo>> = if let Some(ts) = before {
-            Box::new(iter.filter(move |m| m.timestamp < ts))
-        } else {
-            Box::new(iter)
-        };
-        iter.take(limit as usize).cloned().collect::<Vec<_>>().into_iter().rev().collect()
-    }
-
-    // -- Internal --
-
-    fn record(&mut self, msg: MessageInfo) {
-        if self.history.len() >= HISTORY_LIMIT {
-            self.history.pop_front();
+        if self.online {
+            self.message.close(self.token);
         }
-        self.history.push_back(msg);
     }
 }

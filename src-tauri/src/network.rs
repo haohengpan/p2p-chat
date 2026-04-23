@@ -266,4 +266,11 @@ impl Network {
     pub fn close(&self, token: Token) {
         self.inner.lock().unwrap().close(token);
     }
+
+    /// Get the actual remote address of a connection.
+    pub fn peer_addr(&self, token: Token) -> Option<SocketAddr> {
+        let inner = self.inner.lock().unwrap();
+        inner.connections.get(&token)
+            .and_then(|c| c.stream.peer_addr().ok())
+    }
 }

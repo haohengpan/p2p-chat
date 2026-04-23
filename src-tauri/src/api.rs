@@ -141,7 +141,11 @@ pub struct PeerInfo {
     pub peer_id: String,
     pub peer_name: String,
     pub addr: String,
+    #[serde(default = "default_online")]
+    pub online: bool,
 }
+
+fn default_online() -> bool { true }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NoticeLevel {

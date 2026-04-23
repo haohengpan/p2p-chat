@@ -71,6 +71,10 @@ impl Message {
     pub fn close(&self, token: Token) {
         self.net.close(token);
     }
+
+    pub fn peer_addr(&self, token: Token) -> Option<SocketAddr> {
+        self.net.peer_addr(token)
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,8 +1,11 @@
 pub mod api;
 pub mod app;
+pub mod crypto;
+pub mod history;
 pub mod net;
 pub mod network;
 pub mod node;
+pub mod storage;
 
 pub mod bridge;
 pub mod commands;

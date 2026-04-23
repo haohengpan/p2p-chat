@@ -17,6 +17,7 @@ export interface PeerInfo {
   peer_id: string;
   peer_name: string;
   addr: string;
+  online: boolean;
 }
 
 export type Notify =
@@ -33,16 +34,42 @@ export interface SetupResult {
   lan_ip: string;
 }
 
+export interface Profile {
+  node_id: string;
+  username: string;
+  port: number;
+}
+
 // ---------------------------------------------------------------------------
 // Tauri invoke wrappers
 // ---------------------------------------------------------------------------
 
+export async function listProfiles(): Promise<Profile[]> {
+  return invoke("list_profiles");
+}
+
+export async function getSavedPeers(): Promise<PeerInfo[]> {
+  return invoke("get_saved_peers");
+}
+
+export async function loadSavedHistory(convId: string): Promise<MessageInfo[]> {
+  return invoke("load_history", { convId });
+}
+
 export async function setup(
   nodeId: string,
   username: string,
+  password: string,
   port: number
 ): Promise<SetupResult> {
-  return invoke("setup", { nodeId, username, port });
+  return invoke("setup", { nodeId, username, password, port });
+}
+
+export async function login(
+  nodeId: string,
+  password: string
+): Promise<SetupResult> {
+  return invoke("login", { nodeId, password });
 }
 
 export async function connect(addr: string): Promise<void> {
